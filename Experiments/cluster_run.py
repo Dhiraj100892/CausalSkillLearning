@@ -50,6 +50,7 @@ def mkdir(path):
 
 def main(_):
     job_folder = '/checkpoint/tanmayshankar/jobs/' + datetime.date.today().strftime('%y_%m_%d')
+    '''
     mkdir(job_folder)
 
     if len(opts.name) == 0:
@@ -87,8 +88,7 @@ def main(_):
 
     #print('sbatch {}'.format(job_fname))
     os.system('sbatch {}'.format(job_fname))
-
+    '''
 
 if __name__ == '__main__':
     app.run(main)
-

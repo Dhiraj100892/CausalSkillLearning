@@ -36,7 +36,7 @@ import moviepy.editor as mpy
 import subprocess
 import h5py
 import time
-import robosuite
+#import robosuite
 import unittest
 import cProfile
 

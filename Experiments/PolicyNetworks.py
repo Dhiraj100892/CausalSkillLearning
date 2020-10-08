@@ -166,7 +166,7 @@ class ContinuousPolicyNetwork(PolicyNetwork_BaseClass):
 
 		# Remember, because of Pytorch's dynamic construction, this distribution can have it's own batch size. 
 		# It doesn't matter if batch sizes changes over different forward passes of the LSTM, because we're only going
-		# to evaluate this distribution (instance)'s log probability with the same sequence length. 
+		# to evaluate this distribution (instance)'s log probability with the same sequence length.
 		dist = torch.distributions.MultivariateNormal(mean_outputs, torch.diag_embed(variance_outputs))
 		log_probabilities = dist.log_prob(format_action_seq)
 		# log_probabilities = torch.distributions.MultivariateNormal(mean_outputs, torch.diag_embed(variance_outputs)).log_prob(format_action_seq)
@@ -981,7 +981,7 @@ class ContinuousVariationalPolicyNetwork_BPrior(ContinuousVariationalPolicyNetwo
 
 		skill_time_limit = max_limit-1
 
-		if self.args.data=='MIME' or self.args.data=='Roboturk' or self.args.data=='OrigRoboturk' or self.args.data=='FullRoboturk' or self.args.data=='Mocap':
+		if self.args.data=='Kitchen' or self.args.data=='MIME' or self.args.data=='Roboturk' or self.args.data=='OrigRoboturk' or self.args.data=='FullRoboturk' or self.args.data=='Mocap':
 			# If allowing variable skill length, set length for this sample.				
 			if self.args.var_skill_length:
 				# Choose length of 12-16 with certain probabilities. 

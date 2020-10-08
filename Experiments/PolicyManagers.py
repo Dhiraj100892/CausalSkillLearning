@@ -6,8 +6,12 @@
 
 from headers import *
 from PolicyNetworks import *
-from Visualizers import BaxterVisualizer, SawyerVisualizer, ToyDataVisualizer #, MocapVisualizer
-import TFLogger, DMP, RLUtils
+#from Visualizers import BaxterVisualizer, SawyerVisualizer, ToyDataVisualizer #, MocapVisualizer
+#import TFLogger, DMP, RLUtils
+from tensorboardX import SummaryWriter
+import adept_envs
+import gym
+import time
 
 # Check if CUDA is available, set device to GPU if it is, otherwise use CPU.
 use_cuda = torch.cuda.is_available()
@@ -45,14 +49,16 @@ class PolicyManager_BaseClass():
 		if self.args.name is not None:
 			logdir = os.path.join(self.args.logdir, self.args.name)
 			if not(os.path.isdir(logdir)):
-				os.mkdir(logdir)
+				os.makedirs(logdir)
 			logdir = os.path.join(logdir, "logs")
 			if not(os.path.isdir(logdir)):
 				os.mkdir(logdir)
-			# Create TF Logger. 
-			self.tf_logger = TFLogger.Logger(logdir)
+			# Create TF Logger.
+			self.tf_logger = SummaryWriter(log_dir=logdir)
+			#self.tf_logger = TFLogger.Logger(logdir)
 		else:
-			self.tf_logger = TFLogger.Logger()
+			self.tf_logger = SummaryWriter(log_dir=logdir)
+			#self.tf_logger = TFLogger.Logger()
 
 		if self.args.data=='MIME':
 			self.visualizer = BaxterVisualizer()
@@ -62,6 +68,8 @@ class PolicyManager_BaseClass():
 			# self.state_dim = 8
 		elif self.args.data=='Mocap':
 			self.visualizer = MocapVisualizer(args=self.args)
+		elif self.args.data == 'Kitchen':
+			self.visualizer = None
 		else: 
 			self.visualizer = ToyDataVisualizer()
 
@@ -160,6 +168,15 @@ class PolicyManager_BaseClass():
 				concatenated_traj = np.concatenate([trajectory, action_sequence],axis=1)
 
 			return trajectory, action_sequence, concatenated_traj, old_concatenated_traj
+
+		elif self.args.data =='Kitchen':
+			trajectory, action_sequence = self.dataset[i]
+			self.conditional_information = np.zeros((self.conditional_info_size))
+			self.current_traj_len = len(trajectory)
+			# Concatenate
+			concatenated_traj = self.concat_state_action(trajectory, action_sequence[:-1])
+			old_concatenated_traj = self.old_concat_state_action(trajectory, action_sequence[:-1])
+			return trajectory, action_sequence[:-1], concatenated_traj, old_concatenated_traj
 
 	def train(self, model=None):
 
@@ -299,6 +316,50 @@ class PolicyManager_BaseClass():
 
 		# Save webpage. 
 		self.write_results_HTML()
+
+	def rollout_robot_trajectory_kitchen(self, trajectory_start, latent_z, rollout_length=10):
+		subpolicy_inputs = torch.zeros((1, 39 + self.latent_z_dimensionality)).to(device).float()
+		subpolicy_inputs[0, :30] = torch.tensor(trajectory_start).to(device).float()
+		subpolicy_inputs[:, 39:] = torch.tensor(latent_z.reshape(-1)).to(device).float()
+		self.env.reset()
+		# prepare env
+		act_mid = self.env.act_mid
+		act_rng = self.env.act_amp
+		self.env.sim.data.qpos[:] = trajectory_start
+		self.env.sim.forward()
+
+		if rollout_length is not None:
+			length = rollout_length - 1
+		else:
+			length = self.rollout_timesteps - 1
+
+		for t in range(length):
+			actions = self.policy_network.get_actions(subpolicy_inputs, greedy=True)
+
+			# Select last action to execute.
+			action_to_execute = actions[-1].squeeze(1)
+
+			# Compute next state.
+			ctrl = (action_to_execute.detach().numpy().reshape(-1) - self.env.sim.data.qpos[:9]) / (self.env.skip * self.env.model.opt.timestep)
+			act = (ctrl - act_mid) / act_rng
+			act = np.clip(act, -0.999, 0.999)
+			next_obs, reward, done, env_info = self.env.step(act)
+			self.env.render()
+			time.sleep(0.1)
+			#TODO: Need to check this part
+			new_state = torch.from_numpy(self.env.sim.data.qpos).to(device).float()
+
+			# New input row.
+			input_row = torch.zeros((1, 39 + self.latent_z_dimensionality)).to(device).float()
+			input_row[0, :self.state_dim] = new_state
+			# Feed in the ORIGINAL prediction from the network as input. Not the downscaled thing.
+			input_row[0, self.state_dim:39] = actions[-1].squeeze(1)
+			input_row[0, 39:] = torch.tensor(latent_z.reshape(-1)).to(device).float()
+
+			subpolicy_inputs = torch.cat([subpolicy_inputs, input_row], dim=0)
+
+		trajectory = subpolicy_inputs[:, :30].detach().cpu().numpy()
+		return trajectory
 
 	def rollout_robot_trajectory(self, trajectory_start, latent_z, rollout_length=None):
 
@@ -526,7 +587,7 @@ class PolicyManager_Pretrain(PolicyManager_BaseClass):
 		self.number_layers = self.args.number_layers
 		self.traj_length = 5
 		self.number_epochs = self.args.epochs
-		self.test_set_size = 500
+		self.test_set_size = 100
 
 		if self.args.data=='MIME':
 			self.state_size = 16			
@@ -585,6 +646,16 @@ class PolicyManager_Pretrain(PolicyManager_BaseClass):
 			self.output_size = self.state_size
 			self.traj_length = self.args.traj_length			
 			self.conditional_info_size = 0
+
+		elif self.args.data == 'Kitchen':
+			self.state_size = 30
+			self.state_dim = 30
+			self.input_size = 39
+			self.hidden_size = self.args.hidden_size
+			self.output_size = 9
+			self.traj_length = self.args.traj_length
+			self.conditional_info_size = 0
+			self.env = gym.make('kitchen_relax-v1')
 
 		# Training parameters. 		
 		self.baseline_value = 0.
@@ -688,21 +759,20 @@ class PolicyManager_Pretrain(PolicyManager_BaseClass):
 		return image
 
 	def update_plots(self, counter, loglikelihood, sample_traj):
-		
-		self.tf_logger.scalar_summary('Subpolicy Likelihood', loglikelihood.mean(), counter)
-		self.tf_logger.scalar_summary('Total Loss', self.total_loss.mean(), counter)
-		self.tf_logger.scalar_summary('Encoder KL', self.encoder_KL.mean(), counter)
+		self.tf_logger.add_scalar('Subpolicy Likelihood', loglikelihood.mean(), counter)
+		self.tf_logger.add_scalar('Total Loss', self.total_loss.mean(), counter)
+		self.tf_logger.add_scalar('Encoder KL', self.encoder_KL.mean(), counter)
 
 		if not(self.args.reparam):
-			self.tf_logger.scalar_summary('Baseline', self.baseline.sum(), counter)
-			self.tf_logger.scalar_summary('Encoder Loss', self.encoder_loss.sum(), counter)
-			self.tf_logger.scalar_summary('Reinforce Encoder Loss', self.reinforce_encoder_loss.sum(), counter)
-			self.tf_logger.scalar_summary('Total Encoder Loss', self.total_encoder_loss.sum() ,counter)
+			self.tf_logger.add_scalar('Baseline', self.baseline.sum(), counter)
+			self.tf_logger.add_scalar('Encoder Loss', self.encoder_loss.sum(), counter)
+			self.tf_logger.add_scalar('Reinforce Encoder Loss', self.reinforce_encoder_loss.sum(), counter)
+			self.tf_logger.add_scalar('Total Encoder Loss', self.total_encoder_loss.sum() ,counter)
 
 		if self.args.entropy:
 			self.tf_logger.scalar_summary('SubPolicy Entropy', torch.mean(subpolicy_entropy), counter)
 
-		if counter%self.args.display_freq==0:
+		if self.args.data != 'Kitchen'  and  counter%self.args.display_freq==0:
 			self.tf_logger.image_summary("GT Trajectory",self.visualize_trajectory(sample_traj), counter)
 
 	def assemble_inputs(self, input_trajectory, latent_z_indices, latent_b, sample_action_seq):
@@ -760,12 +830,12 @@ class PolicyManager_Pretrain(PolicyManager_BaseClass):
 
 	def get_trajectory_segment(self, i):
 
-		if self.args.data=='Continuous' or self.args.data=='ContinuousDir' or self.args.data=='ContinuousNonZero' or self.args.data=='ContinuousDirNZ' or self.args.data=='GoalDirected' or self.args.data=='Separable':
+		if self.args.data=='Kitchen' or self.args.data=='Continuous' or self.args.data=='ContinuousDir' or self.args.data=='ContinuousNonZero' or self.args.data=='ContinuousDirNZ' or self.args.data=='GoalDirected' or self.args.data=='Separable':
 			# Sample trajectory segment from dataset. 
 			sample_traj, sample_action_seq = self.dataset[i]
 
 			# Subsample trajectory segment. 		
-			start_timepoint = np.random.randint(0,self.args.traj_length-self.traj_length)
+			start_timepoint = np.random.randint(0, sample_traj.shape[0]-self.traj_length)
 			end_timepoint = start_timepoint + self.traj_length
 			# The trajectory is going to be one step longer than the action sequence, because action sequences are constructed from state differences. Instead, truncate trajectory to length of action sequence. 
 			sample_traj = sample_traj[start_timepoint:end_timepoint]	
@@ -968,13 +1038,14 @@ class PolicyManager_Pretrain(PolicyManager_BaseClass):
 			sample_traj, sample_action_seq, concatenated_traj, old_concatenated_traj = self.collect_inputs(i)				
 			# Calling it trajectory segment, but it's not actually a trajectory segment here.
 			trajectory_segment = concatenated_traj
-
+		#embed()
 		if trajectory_segment is not None:
 			############# (1) #############
 			torch_traj_seg = torch.tensor(trajectory_segment).to(device).float()
-			# Encode trajectory segment into latent z. 		
+			# Encode trajectory segment into latent z.
 			latent_z, encoder_loglikelihood, encoder_entropy, kl_divergence = self.encoder_network.forward(torch_traj_seg, self.epsilon)
-
+			#self.rollout_robot_trajectory_kitchen(trajectory_segment[0,:30], latent_z.detach().numpy(), rollout_length=20)
+			#embed()
 			########## (2) & (3) ##########
 			# Feed latent z and trajectory segment into policy network and evaluate likelihood. 
 			latent_z_seq, latent_b = self.construct_dummy_latents(latent_z)
@@ -1002,7 +1073,7 @@ class PolicyManager_Pretrain(PolicyManager_BaseClass):
 
 				self.update_policies_reparam(loglikelihood, subpolicy_inputs, kl_divergence)
 
-				# Update Plots. 
+				# Update Plots.
 				self.update_plots(counter, loglikelihood, trajectory_segment)
 
 				if return_z: 
@@ -1224,6 +1295,17 @@ class PolicyManager_Joint(PolicyManager_BaseClass):
 			# Create visualizer object
 			self.visualizer = MocapVisualizer(args=self.args)
 
+		elif self.args.data == 'Kitchen':
+			self.state_size = 30
+			self.state_dim = 30
+			self.input_size = 39
+			self.hidden_size = self.args.hidden_size
+			self.output_size = 9
+			self.traj_length = self.args.traj_length
+			self.conditional_info_size = 0
+			self.env = gym.make('kitchen_relax-v1')
+			self.visualizer = None
+
 		self.training_phase_size = self.args.training_phase_size
 		self.number_epochs = self.args.epochs
 		self.test_set_size = 500
@@ -1302,7 +1384,7 @@ class PolicyManager_Joint(PolicyManager_BaseClass):
 		save_object['Variational_Policy'] = self.variational_policy.state_dict()
 		torch.save(save_object,os.path.join(savedir,"Model_"+suffix))
 
-	def load_all_models(self, path, just_subpolicy=False):		
+	def load_all_models(self, path, just_subpolicy=False):
 		load_object = torch.load(path)
 		self.policy_network.load_state_dict(load_object['Policy_Network'])
 
@@ -1411,28 +1493,28 @@ class PolicyManager_Joint(PolicyManager_BaseClass):
 
 	def update_plots(self, counter, i, subpolicy_loglikelihood, latent_loglikelihood, subpolicy_entropy, sample_traj, latent_z_logprobability, latent_b_logprobability, kl_divergence, prior_loglikelihood):
 
-		self.tf_logger.scalar_summary('Latent Policy Loss', torch.mean(self.total_latent_loss), counter)
-		self.tf_logger.scalar_summary('SubPolicy Log Likelihood', subpolicy_loglikelihood.mean(), counter)
-		self.tf_logger.scalar_summary('Latent Log Likelihood', latent_loglikelihood.mean(), counter)	
-		self.tf_logger.scalar_summary('Variational Policy Loss', torch.mean(self.variational_loss), counter)
-		self.tf_logger.scalar_summary('Variational Reinforce Loss', torch.mean(self.reinforce_variational_loss), counter)
-		self.tf_logger.scalar_summary('Total Variational Policy Loss', torch.mean(self.total_variational_loss), counter)
-		self.tf_logger.scalar_summary('Baseline', self.baseline.mean(), counter)
-		self.tf_logger.scalar_summary('Total Likelihood', subpolicy_loglikelihood+latent_loglikelihood, counter)
-		self.tf_logger.scalar_summary('Epsilon', self.epsilon, counter)
-		self.tf_logger.scalar_summary('Latent Z LogProbability', latent_z_logprobability, counter)
-		self.tf_logger.scalar_summary('Latent B LogProbability', latent_b_logprobability, counter)
-		self.tf_logger.scalar_summary('KL Divergence', torch.mean(kl_divergence), counter)
-		self.tf_logger.scalar_summary('Prior LogLikelihood', torch.mean(prior_loglikelihood), counter)
+		self.tf_logger.add_scalar('Latent Policy Loss', torch.mean(self.total_latent_loss), counter)
+		self.tf_logger.add_scalar('SubPolicy Log Likelihood', subpolicy_loglikelihood.mean(), counter)
+		self.tf_logger.add_scalar('Latent Log Likelihood', latent_loglikelihood.mean(), counter)
+		self.tf_logger.add_scalar('Variational Policy Loss', torch.mean(self.variational_loss), counter)
+		self.tf_logger.add_scalar('Variational Reinforce Loss', torch.mean(self.reinforce_variational_loss), counter)
+		self.tf_logger.add_scalar('Total Variational Policy Loss', torch.mean(self.total_variational_loss), counter)
+		self.tf_logger.add_scalar('Baseline', self.baseline.mean(), counter)
+		self.tf_logger.add_scalar('Total Likelihood', subpolicy_loglikelihood+latent_loglikelihood, counter)
+		self.tf_logger.add_scalar('Epsilon', self.epsilon, counter)
+		self.tf_logger.add_scalar('Latent Z LogProbability', latent_z_logprobability, counter)
+		self.tf_logger.add_scalar('Latent B LogProbability', latent_b_logprobability, counter)
+		self.tf_logger.add_scalar('KL Divergence', torch.mean(kl_divergence), counter)
+		self.tf_logger.add_scalar('Prior LogLikelihood', torch.mean(prior_loglikelihood), counter)
 
-		if counter%self.args.display_freq==0:
+		if self.args.data != 'Kitchen' and counter%self.args.display_freq==0:
 			# Now adding visuals for MIME, so it doesn't depend what data we use.
 			variational_rollout_image, latent_rollout_image = self.rollout_visuals(counter, i)
 
 			# Compute distance metrics. 
 			var_dist, latent_dist = self.compute_evaluation_metrics(sample_traj, counter, i)
-			self.tf_logger.scalar_summary('Variational Trajectory Distance', var_dist, counter)
-			self.tf_logger.scalar_summary('Latent Trajectory Distance', latent_dist, counter)
+			self.tf_logger.add_scalar('Variational Trajectory Distance', var_dist, counter)
+			self.tf_logger.add_scalar('Latent Trajectory Distance', latent_dist, counter)
 
 			gt_trajectory_image = np.array(self.visualize_trajectory(sample_traj, i=i, suffix='GT'))
 			variational_rollout_image = np.array(variational_rollout_image)
@@ -2149,7 +2231,7 @@ class PolicyManager_BaselineRL(PolicyManager_BaseClass):
 		self.max_timesteps = 100
 		self.gamma = 0.99
 		self.batch_size = 10
-		self.number_test_episodes = 100
+		self.number_test_episodes = 10
 
 		# Per step decay. 
 		self.decay_rate = (self.initial_epsilon-self.final_epsilon)/(self.decay_episodes)
@@ -2499,10 +2581,10 @@ class PolicyManager_BaselineRL(PolicyManager_BaseClass):
 			self.update_networks()
 
 	def update_plots(self, counter):
-		self.tf_logger.scalar_summary('Total Episode Reward', copy.deepcopy(self.episode_reward_statistics), counter)
-		self.tf_logger.scalar_summary('Batch Rewards', self.batch_reward_statistics/self.batch_size, counter)
-		self.tf_logger.scalar_summary('Policy Loss', self.policy_loss_statistics/self.batch_size, counter)
-		self.tf_logger.scalar_summary('Critic Loss', self.critic_loss_statistics/self.batch_size, counter)
+		self.tf_logger.add_scalar('Total Episode Reward', copy.deepcopy(self.episode_reward_statistics), counter)
+		self.tf_logger.add_scalar('Batch Rewards', self.batch_reward_statistics/self.batch_size, counter)
+		self.tf_logger.add_scalar('Policy Loss', self.policy_loss_statistics/self.batch_size, counter)
+		self.tf_logger.add_scalar('Critic Loss', self.critic_loss_statistics/self.batch_size, counter)
 
 		if counter%self.args.display_freq==0:
 
@@ -3217,7 +3299,7 @@ class PolicyManager_Imitation(PolicyManager_Pretrain, PolicyManager_BaselineRL):
 		self.optimizer.step()
 
 	def update_plots(self, counter, logprobabilities):
-		self.tf_logger.scalar_summary('Policy LogLikelihood', torch.mean(logprobabilities), counter)
+		self.tf_logger.add_scalar('Policy LogLikelihood', torch.mean(logprobabilities), counter)
 
 		if counter%self.args.display_freq==0:
 
@@ -3326,7 +3408,7 @@ class PolicyManager_Imitation(PolicyManager_Pretrain, PolicyManager_BaselineRL):
 		np.save(os.path.join(self.dir_name,"Mean_Reward_{0}.npy".format(self.args.name)),self.total_rewards.mean())
 
 		# Add average reward to tensorboard.
-		self.tf_logger.scalar_summary('Average Reward', self.total_rewards.mean(), model_epoch)
+		self.tf_logger.add_scalar('Average Reward', self.total_rewards.mean(), model_epoch)
 
 	def train(self, model=None):
 
@@ -3584,19 +3666,19 @@ class PolicyManager_Transfer(PolicyManager_BaseClass):
 	def update_plots(self, counter, viz_dict):
 
 		# VAE Losses. 
-		self.tf_logger.scalar_summary('Policy LogLikelihood', self.likelihood_loss, counter)
-		self.tf_logger.scalar_summary('Discriminability Loss', self.discriminability_loss, counter)
-		self.tf_logger.scalar_summary('Encoder KL', self.encoder_KL, counter)
-		self.tf_logger.scalar_summary('VAE Loss', self.VAE_loss, counter)
-		self.tf_logger.scalar_summary('Total VAE Loss', self.total_VAE_loss, counter)
-		self.tf_logger.scalar_summary('Domain', viz_dict['domain'], counter)
+		self.tf_logger.add_scalar('Policy LogLikelihood', self.likelihood_loss, counter)
+		self.tf_logger.add_scalar('Discriminability Loss', self.discriminability_loss, counter)
+		self.tf_logger.add_scalar('Encoder KL', self.encoder_KL, counter)
+		self.tf_logger.add_scalar('VAE Loss', self.VAE_loss, counter)
+		self.tf_logger.add_scalar('Total VAE Loss', self.total_VAE_loss, counter)
+		self.tf_logger.add_scalar('Domain', viz_dict['domain'], counter)
 
 		# Plot discriminator values after we've started training it. 
 		if self.training_phase>1:
 			# Discriminator Loss. 
-			self.tf_logger.scalar_summary('Discriminator Loss', self.discriminator_loss, counter)
+			self.tf_logger.add_scalar('Discriminator Loss', self.discriminator_loss, counter)
 			# Compute discriminator prob of right action for logging. 
-			self.tf_logger.scalar_summary('Discriminator Probability', viz_dict['discriminator_probs'], counter)
+			self.tf_logger.add_scalar('Discriminator Probability', viz_dict['discriminator_probs'], counter)
 		
 		# If we are displaying things: 
 		if counter%self.args.display_freq==0:
@@ -3652,8 +3734,8 @@ class PolicyManager_Transfer(PolicyManager_BaseClass):
 				# Actually, we've probably computed trajectory and latent sets. 
 				self.evaluate_correspondence_metrics()
 
-				self.tf_logger.scalar_summary('Source To Target Trajectory Distance', self.source_target_trajectory_distance, counter)		
-				self.tf_logger.scalar_summary('Target To Source Trajectory Distance', self.target_source_trajectory_distance, counter)
+				self.tf_logger.add_scalar('Source To Target Trajectory Distance', self.source_target_trajectory_distance, counter)
+				self.tf_logger.add_scalar('Target To Source Trajectory Distance', self.target_source_trajectory_distance, counter)
 
 	def get_transform(self, latent_z_set, projection='tsne', shared=False):
 

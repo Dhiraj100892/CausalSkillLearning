@@ -5,7 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 from headers import *
-import DataLoaders, MIME_DataLoader, Roboturk_DataLoader, Mocap_DataLoader
+#import DataLoaders, MIME_DataLoader, Roboturk_DataLoader, Mocap_DataLoader
+from RelayPolicyLearningDataLoader import KitchenDataset
 from PolicyManagers import *
 import TestClass
 
@@ -17,7 +18,9 @@ def return_dataset(args, data=None):
 		args.data = data
 
 	# Define Data Loader.
-	if args.data=='Continuous':
+	if args.data=='Kitchen':
+		dataset = KitchenDataset()
+	elif args.data=='Continuous':
 		dataset = DataLoaders.ContinuousToyDataset(args.datadir)
 	elif args.data=='ContinuousNonZero':
 		dataset = DataLoaders.ContinuousNonZeroToyDataset(args.datadir)
