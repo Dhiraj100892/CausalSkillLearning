@@ -318,9 +318,9 @@ class PolicyManager_BaseClass():
 		self.write_results_HTML()
 
 	def rollout_robot_trajectory_kitchen(self, trajectory_start, latent_z, rollout_length=10):
-		subpolicy_inputs = torch.zeros((1, 39 + self.latent_z_dimensionality)).to(device).float()
-		subpolicy_inputs[0, :30] = torch.tensor(trajectory_start).to(device).float()
-		subpolicy_inputs[:, 39:] = torch.tensor(latent_z.reshape(-1)).to(device).float()
+		subpolicy_inputs = torch.zeros((1, self.state_size + self.output_size + self.latent_z_dimensionality)).to(device).float()
+		subpolicy_inputs[0, :self.state_size] = torch.tensor(trajectory_start).to(device).float()
+		subpolicy_inputs[:, self.state_size + self.output_size:] = torch.tensor(latent_z.reshape(-1)).to(device).float()
 		self.env.reset()
 		# prepare env
 		act_mid = self.env.act_mid
@@ -337,10 +337,12 @@ class PolicyManager_BaseClass():
 			actions = self.policy_network.get_actions(subpolicy_inputs, greedy=True)
 
 			# Select last action to execute.
-			action_to_execute = actions[-1].squeeze(1)
+			action_to_execute = actions[-1].squeeze(1).detach().numpy().reshape(-1)
 
 			# Compute next state.
-			ctrl = (action_to_execute.detach().numpy().reshape(-1) - self.env.sim.data.qpos[:9]) / (self.env.skip * self.env.model.opt.timestep)
+			if self.args.use_delta or self.args.normalize:
+				action_to_execute = self.dataset.unnormalize(self.env.sim.data.qpos[:9], action_to_execute)
+			ctrl = (action_to_execute - self.env.sim.data.qpos[:9]) / (self.env.skip * self.env.model.opt.timestep)
 			act = (ctrl - act_mid) / act_rng
 			act = np.clip(act, -0.999, 0.999)
 			next_obs, reward, done, env_info = self.env.step(act)
@@ -650,9 +652,12 @@ class PolicyManager_Pretrain(PolicyManager_BaseClass):
 		elif self.args.data == 'Kitchen':
 			self.state_size = 30
 			self.state_dim = 30
-			self.input_size = 39
-			self.hidden_size = self.args.hidden_size
 			self.output_size = 9
+			if self.args.include_vel:
+				self.state_size = 59
+				self.state_dim = 59
+			self.input_size = self.state_dim + self.output_size
+			self.hidden_size = self.args.hidden_size
 			self.traj_length = self.args.traj_length
 			self.conditional_info_size = 0
 			self.env = gym.make('kitchen_relax-v1')
@@ -1044,7 +1049,7 @@ class PolicyManager_Pretrain(PolicyManager_BaseClass):
 			torch_traj_seg = torch.tensor(trajectory_segment).to(device).float()
 			# Encode trajectory segment into latent z.
 			latent_z, encoder_loglikelihood, encoder_entropy, kl_divergence = self.encoder_network.forward(torch_traj_seg, self.epsilon)
-			#self.rollout_robot_trajectory_kitchen(trajectory_segment[0,:30], latent_z.detach().numpy(), rollout_length=20)
+			self.rollout_robot_trajectory_kitchen(trajectory_segment[0,:30], latent_z.detach().numpy(), rollout_length=20)
 			#embed()
 			########## (2) & (3) ##########
 			# Feed latent z and trajectory segment into policy network and evaluate likelihood. 
@@ -1308,7 +1313,7 @@ class PolicyManager_Joint(PolicyManager_BaseClass):
 
 		self.training_phase_size = self.args.training_phase_size
 		self.number_epochs = self.args.epochs
-		self.test_set_size = 500
+		self.test_set_size = 100
 		self.baseline_value = 0.
 		self.beta_decay = 0.9
 

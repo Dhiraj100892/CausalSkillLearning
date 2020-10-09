@@ -66,3 +66,10 @@ Just as in the case of the MIME dataset, you can then run the joint training usi
 python Master.py --train=1 --setting=learntsub --name=RJ80 --latent_loss_weight=1. --latentpolicy_ratio=0.01 --kl_weight=0.0001 --subpolicy_ratio=0.1 --b_probability_factor=0.001 --data=Roboturk --subpolicy_model=Experiment_Logs/<Roboturk_Pretraining>/saved_models/Model_epoch20 --z_dimensions=64 --traj_length=-1 --var_skill_length=1 --number_layers=8 --hidden_size=128
 ```
 Stay tuned for more! 
+
+For kitchen dataset
+
+Pretraining 
+```
+python Master.py --data_path=/home/dhiraj/Downloads/kitchen_demos_multitask_extracted_data--train=1 --setting=pretrain_sub --name=Kitchen_Pretraining_# --data=Kitchen --number_layers=8 --hidden_size=128 --kl_weight=0.01 --var_skill_length=1 --z_dimensions=64 --traj_length=10 --use_delta --include_vel 
+```

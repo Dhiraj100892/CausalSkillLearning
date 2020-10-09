@@ -19,7 +19,7 @@ def return_dataset(args, data=None):
 
 	# Define Data Loader.
 	if args.data=='Kitchen':
-		dataset = KitchenDataset()
+		dataset = KitchenDataset(path = args.data_path, delta=args.use_delta, include_vel=args.include_vel, normalize=args.normalize)
 	elif args.data=='Continuous':
 		dataset = DataLoaders.ContinuousToyDataset(args.datadir)
 	elif args.data=='ContinuousNonZero':
@@ -228,11 +228,21 @@ def parse_arguments():
 	parser.add_argument('--burn_in_eps',dest='burn_in_eps',type=int,default=500) # How many epsiodes to burn in.
 	parser.add_argument('--random_memory_burn_in',dest='random_memory_burn_in',type=int,default=1) # Whether to burn in episodes into memory randomly or not.
 	parser.add_argument('--shaped_reward',dest='shaped_reward',type=int,default=0) # Whether or not to use shaped rewards.
-	parser.add_argument('--memory_size',dest='memory_size',type=int,default=2000) # Size of replay memory. 2000 is okay, but is still kind of short sighted. 
+	parser.add_argument('--memory_size',dest='memory_size', type=int, default=2000) # Size of replay memory. 2000 is okay, but is still kind of short sighted.
 
 	# Transfer learning domains, etc. 
 	parser.add_argument('--source_domain',dest='source_domain',type=str,help='What the source domain is in transfer.')
 	parser.add_argument('--target_domain',dest='target_domain',type=str,help='What the target domain is in transfer.')
+
+	# for kitchen dataset
+	parser.add_argument('--use_delta', action='store_true', default=False,
+						help='whether to predict delta or not')
+	parser.add_argument('--include_vel', action='store_true', default=False,
+						help='whether to include velocity in the state')
+	parser.add_argument('--normalize', action='store_true', default=False,
+						help='whether to normalize the data or not')
+	parser.add_argument('--data_path', type=str, default='/home/dhiraj/Downloads/kitchen_demos_multitask_extracted_data',
+						help='place where data pickle files are stored')
 
 	return parser.parse_args()
 
